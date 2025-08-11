@@ -70,7 +70,7 @@ func (m *Master) loadDataset() (*ctr.Dataset, *dataset.Dataset, error) {
 		logics.NewLatest(m.Config.Recommend.CacheSize, initialStartTime),
 		logics.NewPopular(m.Config.Recommend.Popular.PopularWindow, m.Config.Recommend.CacheSize, initialStartTime),
 	}
-	for _, cfg := range m.Config.Recommend.NonPersonalized {
+	for _,`` cfg := range m.Config.Recommend.NonPersonalized {
 		recommender, err := logics.NewNonPersonalized(cfg, m.Config.Recommend.CacheSize, initialStartTime)
 		if err != nil {
 			return nil, nil, errors.Trace(err)

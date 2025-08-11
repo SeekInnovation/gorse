@@ -52,6 +52,7 @@ func (typ ExprType) String() string {
 	}
 }
 
+// TODO fabio: add weight here (:weight)
 type FeedbackTypeExpression struct {
 	FeedbackType string
 	ExprType     ExprType
