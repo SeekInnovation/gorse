@@ -957,7 +957,9 @@ func (s *RestServer) RecommendUserBased(ctx *recommendContext) error {
 						return errors.Trace(err)
 					}
 					if reflect.DeepEqual(ctx.categories, []string{""}) || lo.Every(item.Categories, ctx.categories) {
-						candidates[feedback.ItemId] += user.Score
+						// weight the contribution by feedback type weight
+						w := expression.FeedbackWeight(s.Config.Recommend.DataSource.PositiveFeedbackTypes, feedback.FeedbackType, feedback.Value)
+						candidates[feedback.ItemId] += user.Score * w
 					}
 				}
 			}
@@ -1007,7 +1009,9 @@ func (s *RestServer) RecommendItemBased(ctx *recommendContext) error {
 			// add unseen items
 			for _, item := range similarItems {
 				if !ctx.excludeSet.Contains(item.Id) {
-					candidates[item.Id] += item.Score
+					// weight the contribution by feedback type weight
+					w := expression.FeedbackWeight(s.Config.Recommend.DataSource.PositiveFeedbackTypes, feedback.FeedbackType, feedback.Value)
+					candidates[item.Id] += item.Score * w
 				}
 			}
 		}
@@ -1204,7 +1208,9 @@ func (s *RestServer) sessionRecommend(request *restful.Request, response *restfu
 		// similarItems = s.FilterOutHiddenScores(response, similarItems, "")
 		for _, item := range similarItems {
 			if !excludeSet.Contains(item.Id) {
-				candidates[item.Id] += item.Score
+				// weight the contribution by feedback type weight
+				w := expression.FeedbackWeight(s.Config.Recommend.DataSource.PositiveFeedbackTypes, feedback.FeedbackType, feedback.Value)
+				candidates[item.Id] += item.Score * w
 			}
 		}
 		// finish recommendation if the number of used feedbacks is enough

@@ -25,7 +25,7 @@ import (
 	"github.com/samber/lo"
 )
 
-var expressionPattern = regexp.MustCompile(`^(?P<feedback_type>[a-zA-Z][a-zA-Z0-9_]*)(?P<expr_type><=|>=|<|>|=)?(?P<value>[0-9]*\.?[0-9]*)$`)
+var expressionPattern = regexp.MustCompile(`^(?P<feedback_type>[a-zA-Z][a-zA-Z0-9_]*)(?P<expr_type><=|>=|<|>|=)?(?P<value>[0-9]*\.?[0-9]*)(?::(?P<weight>[0-9]*\.?[0-9]*))?$`)
 
 type ExprType int
 
@@ -52,11 +52,11 @@ func (typ ExprType) String() string {
 	}
 }
 
-// TODO fabio: add weight here (:weight)
 type FeedbackTypeExpression struct {
 	FeedbackType string
 	ExprType     ExprType
 	Value        float64
+	Weight       float64
 }
 
 func (f *FeedbackTypeExpression) String() string {
@@ -73,6 +73,7 @@ func (f *FeedbackTypeExpression) FromString(data string) error {
 	if len(subMatches) == 0 {
 		return errors.New("invalid expression format, expected format: <feedback_type>[<operator><value>]")
 	}
+	f.Weight = 1
 	for i, match := range subMatches {
 		switch groupNames[i] {
 		case "feedback_type":
@@ -96,6 +97,14 @@ func (f *FeedbackTypeExpression) FromString(data string) error {
 				f.Value, err = strconv.ParseFloat(match, 64)
 				if err != nil {
 					return fmt.Errorf("invalid value: %w", err)
+				}
+			}
+		case "weight":
+			if len(match) > 0 {
+				var err error
+				f.Weight, err = strconv.ParseFloat(match, 64)
+				if err != nil {
+					return fmt.Errorf("invalid weight: %w", err)
 				}
 			}
 		}
@@ -187,4 +196,18 @@ func MustParseFeedbackTypeExpression(s string) FeedbackTypeExpression {
 	var expr FeedbackTypeExpression
 	lo.Must0(expr.FromString(s))
 	return expr
+}
+
+// FeedbackWeight returns the weight matched by the first expression
+// that matches the given feedback type and value. Defaults to 1 if not found.
+func FeedbackWeight(exprs []FeedbackTypeExpression, feedbackType string, value float64) float64 {
+	for _, expr := range exprs {
+		if expr.Match(feedbackType, value) {
+			if expr.Weight == 0 {
+				return 1
+			}
+			return expr.Weight
+		}
+	}
+	return 1
 }
