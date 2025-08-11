@@ -41,6 +41,7 @@ type UserToUserOptions struct {
 type UserToUser interface {
 	Users() []*data.User
 	Push(user *data.User, feedback []int32)
+	PushWeighted(user *data.User, feedback []lo.Tuple2[int32, float32])
 	PopAll(i int) []cache.Score
 	Timestamp() time.Time
 }
@@ -150,6 +151,10 @@ func (e *embeddingUserToUser) Push(user *data.User, _ []int32) {
 	_ = e.index.Add(v)
 }
 
+func (e *embeddingUserToUser) PushWeighted(user *data.User, _ []lo.Tuple2[int32, float32]) {
+	e.Push(user, nil)
+}
+
 type tagsUserToUser struct {
 	baseUserToUser[[]dataset.ID]
 	IDF[dataset.ID]
@@ -195,8 +200,12 @@ func (t *tagsUserToUser) Push(user *data.User, _ []int32) {
 	_ = t.index.Add(v)
 }
 
+func (t *tagsUserToUser) PushWeighted(user *data.User, _ []lo.Tuple2[int32, float32]) {
+	t.Push(user, nil)
+}
+
 type itemsUserToUser struct {
-	baseUserToUser[[]int32]
+	baseUserToUser[[]lo.Tuple2[int32, float32]]
 	IDF[int32]
 }
 
@@ -205,27 +214,31 @@ func newItemsUserToUser(cfg config.UserToUserConfig, n int, timestamp time.Time,
 		return nil, errors.New("column is not supported in items user-to-user")
 	}
 	i := &itemsUserToUser{IDF: idf}
-	i.baseUserToUser = baseUserToUser[[]int32]{
+	i.baseUserToUser = baseUserToUser[[]lo.Tuple2[int32, float32]]{
 		name:      cfg.Name,
 		n:         n,
 		timestamp: timestamp,
-		index:     ann.NewHNSW[[]int32](i.distance),
+		index:     ann.NewHNSW[[]lo.Tuple2[int32, float32]](i.distanceWeightedPairs),
 	}
 	return i, nil
 }
 
 func (i *itemsUserToUser) Push(user *data.User, feedback []int32) {
-	// Sort feedback
-	sort.Slice(feedback, func(i, j int) bool {
-		return feedback[i] < feedback[j]
-	})
-	// Push user
+	pairs := make([]lo.Tuple2[int32, float32], len(feedback))
+	for idx, v := range feedback {
+		pairs[idx] = lo.Tuple2[int32, float32]{A: v, B: 1}
+	}
+	sort.Slice(pairs, func(a, b int) bool { return pairs[a].A < pairs[b].A })
+	i.PushWeighted(user, pairs)
+}
+
+func (i *itemsUserToUser) PushWeighted(user *data.User, feedback []lo.Tuple2[int32, float32]) {
 	i.users = append(i.users, user)
 	_ = i.index.Add(feedback)
 }
 
 type autoUserToUser struct {
-	baseUserToUser[lo.Tuple2[[]dataset.ID, []int32]]
+	baseUserToUser[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]]
 	tIDF IDF[dataset.ID]
 	iIDF IDF[int32]
 }
@@ -235,11 +248,11 @@ func newAutoUserToUser(cfg config.UserToUserConfig, n int, timestamp time.Time, 
 		tIDF: tIDF,
 		iIDF: iIDF,
 	}
-	a.baseUserToUser = baseUserToUser[lo.Tuple2[[]dataset.ID, []int32]]{
+	a.baseUserToUser = baseUserToUser[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]]{
 		name:      cfg.Name,
 		n:         n,
 		timestamp: timestamp,
-		index:     ann.NewHNSW[lo.Tuple2[[]dataset.ID, []int32]](a.distance),
+		index:     ann.NewHNSW[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]](a.distance),
 	}
 	return a, nil
 }
@@ -252,15 +265,24 @@ func (a *autoUserToUser) Push(user *data.User, feedback []int32) {
 	sort.Slice(t, func(i, j int) bool {
 		return t[i] < t[j]
 	})
-	// Sort feedback
-	sort.Slice(feedback, func(i, j int) bool {
-		return feedback[i] < feedback[j]
-	})
-	// Push user
+	pairs := make([]lo.Tuple2[int32, float32], len(feedback))
+	for idx, v := range feedback {
+		pairs[idx] = lo.Tuple2[int32, float32]{A: v, B: 1}
+	}
+	sort.Slice(pairs, func(i1, j1 int) bool { return pairs[i1].A < pairs[j1].A })
 	a.users = append(a.users, user)
-	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []int32]{A: t, B: feedback})
+	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]{A: t, B: pairs})
 }
 
-func (a *autoUserToUser) distance(u, v lo.Tuple2[[]dataset.ID, []int32]) float32 {
-	return (a.tIDF.distance(u.A, v.A) + a.iIDF.distance(u.B, v.B)) / 2
+func (a *autoUserToUser) PushWeighted(user *data.User, feedback []lo.Tuple2[int32, float32]) {
+	tSet := mapset.NewSet[dataset.ID]()
+	flatten(user.Labels, tSet)
+	t := tSet.ToSlice()
+	sort.Slice(t, func(i, j int) bool { return t[i] < t[j] })
+	a.users = append(a.users, user)
+	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]{A: t, B: feedback})
+}
+
+func (a *autoUserToUser) distance(u, v lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]) float32 {
+	return (a.tIDF.distance(u.A, v.A) + a.iIDF.distanceWeightedPairs(u.B, v.B)) / 2
 }

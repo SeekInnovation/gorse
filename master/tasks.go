@@ -566,7 +566,9 @@ func (m *Master) LoadDataFromDatabase(
 				mu.Lock()
 				posFeedbackCount++
 				// insert feedback to evaluator
-				evaluator.Positive(f.FeedbackType, userIndex, itemIndex, f.Timestamp)
+				// compute normalized weight for metrics
+				w := expression.FeedbackWeight(posFeedbackTypes, f.FeedbackType, f.Value)
+				evaluator.Positive(f.FeedbackType, userIndex, itemIndex, w, f.Timestamp)
 				mu.Unlock()
 
 				// append item feedback
@@ -587,7 +589,8 @@ func (m *Master) LoadDataFromDatabase(
 						break
 					}
 				}
-				dataSet.AddFeedback(f.UserId, f.ItemId)
+				// accumulate weighted feedback for similarity models
+				dataSet.AddFeedbackWeighted(f.UserId, f.ItemId, float32(w))
 			}
 			span.Add(len(feedback))
 		}
@@ -751,7 +754,17 @@ func (m *Master) updateItemToItem(dataset *dataset.Dataset) error {
 	for i, item := range dataset.GetItems() {
 		if !item.IsHidden {
 			for _, recommender := range itemToItemRecommenders {
-				recommender.Push(&item, dataset.GetItemFeedback()[i])
+				// Build weighted pairs sorted by user index if available
+				weighted := dataset.GetItemFeedbackWeighted()
+				var pairs []lo.Tuple2[int32, float32]
+				if weighted != nil && i < len(weighted) && weighted[i] != nil {
+					pairs = make([]lo.Tuple2[int32, float32], 0, len(weighted[i]))
+					for uid, w := range weighted[i] {
+						pairs = append(pairs, lo.Tuple2[int32, float32]{A: uid, B: w})
+					}
+					sort.Slice(pairs, func(a, b int) bool { return pairs[a].A < pairs[b].A })
+				}
+				recommender.PushWeighted(&item, pairs)
 				span.Add(1)
 			}
 		}
@@ -868,7 +881,16 @@ func (m *Master) updateUserToUser(dataset *dataset.Dataset) error {
 	// Push users to user-to-user recommender
 	for i, user := range dataset.GetUsers() {
 		for _, recommender := range userToUserRecommenders {
-			recommender.Push(&user, dataset.GetUserFeedback()[i])
+			weighted := dataset.GetUserFeedbackWeighted()
+			var pairs []lo.Tuple2[int32, float32]
+			if weighted != nil && i < len(weighted) && weighted[i] != nil {
+				pairs = make([]lo.Tuple2[int32, float32], 0, len(weighted[i]))
+				for iid, w := range weighted[i] {
+					pairs = append(pairs, lo.Tuple2[int32, float32]{A: iid, B: w})
+				}
+				sort.Slice(pairs, func(a, b int) bool { return pairs[a].A < pairs[b].A })
+			}
+			recommender.PushWeighted(&user, pairs)
 			span.Add(1)
 		}
 	}

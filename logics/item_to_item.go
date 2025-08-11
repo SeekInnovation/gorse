@@ -67,6 +67,7 @@ type ItemToItem interface {
 	Timestamp() time.Time
 	Items() []*data.Item
 	Push(item *data.Item, feedback []int32)
+	PushWeighted(item *data.Item, feedback []lo.Tuple2[int32, float32])
 	PopAll(i int) []cache.Score
 	Pool() parallel.Pool
 }
@@ -191,6 +192,10 @@ func (e *embeddingItemToItem) Push(item *data.Item, _ []int32) {
 	_ = e.index.Add(v)
 }
 
+func (e *embeddingItemToItem) PushWeighted(item *data.Item, _ []lo.Tuple2[int32, float32]) {
+	e.Push(item, nil)
+}
+
 type tagsItemToItem struct {
 	baseItemToItem[[]dataset.ID]
 	IDF[dataset.ID]
@@ -241,8 +246,12 @@ func (t *tagsItemToItem) Push(item *data.Item, _ []int32) {
 	_ = t.index.Add(v)
 }
 
+func (t *tagsItemToItem) PushWeighted(item *data.Item, _ []lo.Tuple2[int32, float32]) {
+	t.Push(item, nil)
+}
+
 type usersItemToItem struct {
-	baseItemToItem[[]int32]
+	baseItemToItem[[]lo.Tuple2[int32, float32]]
 	IDF[int32]
 }
 
@@ -251,11 +260,11 @@ func newUsersItemToItem(cfg config.ItemToItemConfig, n int, timestamp time.Time,
 		return nil, errors.New("column is not supported in users item-to-item")
 	}
 	u := &usersItemToItem{IDF: idf}
-	u.baseItemToItem = baseItemToItem[[]int32]{
+	u.baseItemToItem = baseItemToItem[[]lo.Tuple2[int32, float32]]{
 		name:      cfg.Name,
 		n:         n,
 		timestamp: timestamp,
-		index:     ann.NewHNSW[[]int32](u.distance),
+		index:     ann.NewHNSW[[]lo.Tuple2[int32, float32]](u.distanceWeightedPairs),
 	}
 	return u, nil
 }
@@ -265,17 +274,24 @@ func (u *usersItemToItem) Push(item *data.Item, feedback []int32) {
 	if item.IsHidden {
 		return
 	}
-	// Sort feedback
-	sort.Slice(feedback, func(i, j int) bool {
-		return feedback[i] < feedback[j]
-	})
-	// Push item
+	pairs := make([]lo.Tuple2[int32, float32], len(feedback))
+	for i, v := range feedback {
+		pairs[i] = lo.Tuple2[int32, float32]{A: v, B: 1}
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].A < pairs[j].A })
+	u.PushWeighted(item, pairs)
+}
+
+func (u *usersItemToItem) PushWeighted(item *data.Item, feedback []lo.Tuple2[int32, float32]) {
+	if item.IsHidden {
+		return
+	}
 	u.items = append(u.items, item)
 	_ = u.index.Add(feedback)
 }
 
 type autoItemToItem struct {
-	baseItemToItem[lo.Tuple2[[]dataset.ID, []int32]]
+	baseItemToItem[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]]
 	tIDF IDF[dataset.ID]
 	uIDF IDF[int32]
 }
@@ -285,11 +301,11 @@ func newAutoItemToItem(cfg config.ItemToItemConfig, n int, timestamp time.Time, 
 		tIDF: tIDF,
 		uIDF: uIDF,
 	}
-	a.baseItemToItem = baseItemToItem[lo.Tuple2[[]dataset.ID, []int32]]{
+	a.baseItemToItem = baseItemToItem[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]]{
 		name:      cfg.Name,
 		n:         n,
 		timestamp: timestamp,
-		index:     ann.NewHNSW[lo.Tuple2[[]dataset.ID, []int32]](a.distance),
+		index:     ann.NewHNSW[lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]](a.distance),
 	}
 	return a, nil
 }
@@ -306,17 +322,71 @@ func (a *autoItemToItem) Push(item *data.Item, feedback []int32) {
 	sort.Slice(v, func(i, j int) bool {
 		return v[i] < v[j]
 	})
-	// Sort feedback
-	sort.Slice(feedback, func(i, j int) bool {
-		return feedback[i] < feedback[j]
-	})
-	// Push item
+	pairs := make([]lo.Tuple2[int32, float32], len(feedback))
+	for i, u := range feedback {
+		pairs[i] = lo.Tuple2[int32, float32]{A: u, B: 1}
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].A < pairs[j].A })
 	a.items = append(a.items, item)
-	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []int32]{A: v, B: feedback})
+	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]{A: v, B: pairs})
 }
 
-func (a *autoItemToItem) distance(u, v lo.Tuple2[[]dataset.ID, []int32]) float32 {
-	return (a.tIDF.distance(u.A, v.A) + a.uIDF.distance(u.B, v.B)) / 2
+func (a *autoItemToItem) PushWeighted(item *data.Item, feedback []lo.Tuple2[int32, float32]) {
+	if item.IsHidden {
+		return
+	}
+	tSet := mapset.NewSet[dataset.ID]()
+	flatten(item.Labels, tSet)
+	v := tSet.ToSlice()
+	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	a.items = append(a.items, item)
+	_ = a.index.Add(lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]{A: v, B: feedback})
+}
+
+func (a *autoItemToItem) distance(u, v lo.Tuple2[[]dataset.ID, []lo.Tuple2[int32, float32]]) float32 {
+	return (a.tIDF.distance(u.A, v.A) + a.uIDF.distanceWeightedPairs(u.B, v.B)) / 2
+}
+
+func (idf IDF[int32]) distanceWeightedPairs(a, b []lo.Tuple2[int32, float32]) float32 {
+	i, j := 0, 0
+	var commonSum, count, sumA, sumB float32
+	for i < len(a) && j < len(b) {
+		if a[i].A == b[j].A {
+			w := minf(a[i].B, b[j].B)
+			commonSum += idf[a[i].A] * w
+			count++
+			sumA += idf[a[i].A] * a[i].B
+			sumB += idf[b[j].A] * b[j].B
+			i++
+			j++
+		} else if a[i].A < b[j].A {
+			sumA += idf[a[i].A] * a[i].B
+			i++
+		} else {
+			sumB += idf[b[j].A] * b[j].B
+			j++
+		}
+	}
+	for ; i < len(a); i++ {
+		sumA += idf[a[i].A] * a[i].B
+	}
+	for ; j < len(b); j++ {
+		sumB += idf[b[j].A] * b[j].B
+	}
+	if len(a) == len(b) && count == float32(len(a)) {
+		return 0
+	} else if count > 0 && len(a) > 0 && len(b) > 0 {
+		return 1 - commonSum*count/(math32.Sqrt(sumA)*math32.Sqrt(sumB)*(count+100))
+	} else {
+		return 1
+	}
+}
+
+func minf(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 type IDF[T dataset.ID | int32] []float32

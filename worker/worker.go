@@ -594,7 +594,7 @@ func (w *Worker) Recommend(users []data.User) {
 		}
 
 		// load positive items
-		var positiveItems []string
+		var positiveItems map[string]float64
 		if w.Config.Recommend.Offline.EnableItemBasedRecommend {
 			positiveItems, err = userFeedbackCache.GetUserFeedback(ctx, userId)
 			if err != nil {
@@ -643,7 +643,7 @@ func (w *Worker) Recommend(users []data.User) {
 			name := w.Config.Recommend.ItemToItem[0].Name
 			// collect candidates
 			scores := make(map[string]float64)
-			for _, itemId := range positiveItems {
+			for itemId, weight := range positiveItems {
 				// load similar items
 				similarItems, err := w.CacheClient.SearchScores(ctx, cache.ItemToItem, cache.Key(name, itemId), nil, 0, w.Config.Recommend.CacheSize)
 				if err != nil {
@@ -653,7 +653,7 @@ func (w *Worker) Recommend(users []data.User) {
 				// add unseen items
 				for _, item := range similarItems {
 					if !excludeSet.Contains(item.Id) && itemCache.IsAvailable(item.Id) {
-						scores[item.Id] += item.Score
+						scores[item.Id] += item.Score * weight
 					}
 				}
 				// load item neighbors digest
@@ -707,9 +707,9 @@ func (w *Worker) Recommend(users []data.User) {
 				}
 				MemoryInuseBytesVec.WithLabelValues("user_feedback_cache").Set(float64(sizeof.DeepSize(userFeedbackCache)))
 				// add unseen items
-				for _, itemId := range similarUserPositiveItems {
+				for itemId, weight := range similarUserPositiveItems {
 					if !excludeSet.Contains(itemId) && itemCache.IsAvailable(itemId) {
-						scores[itemId] += user.Score
+						scores[itemId] += user.Score * weight
 					}
 				}
 				// load user neighbors digest
@@ -1365,19 +1365,19 @@ func NewFeedbackCache(worker *Worker, feedbackTypes ...expression.FeedbackTypeEx
 }
 
 // GetUserFeedback gets user feedback from cache or database.
-func (c *FeedbackCache) GetUserFeedback(ctx context.Context, userId string) ([]string, error) {
+func (c *FeedbackCache) GetUserFeedback(ctx context.Context, userId string) (map[string]float64, error) {
 	if tmp, ok := c.Cache.Get(userId); ok {
-		return tmp.([]string), nil
-	} else {
-		items := make([]string, 0)
-		feedbacks, err := c.Client.GetUserFeedback(ctx, userId, c.Config.Now(), c.Types...)
-		if err != nil {
-			return nil, err
-		}
-		for _, feedback := range feedbacks {
-			items = append(items, feedback.ItemId)
-		}
-		c.Cache.Set(userId, items)
-		return items, nil
+		return tmp.(map[string]float64), nil
 	}
+	weights := make(map[string]float64)
+	feedbacks, err := c.Client.GetUserFeedback(ctx, userId, c.Config.Now(), c.Types...)
+	if err != nil {
+		return nil, err
+	}
+	for _, feedback := range feedbacks {
+		w := expression.FeedbackWeight(c.Types, feedback.FeedbackType, feedback.Value)
+		weights[feedback.ItemId] += w
+	}
+	c.Cache.Set(userId, weights)
+	return weights, nil
 }

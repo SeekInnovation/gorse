@@ -73,7 +73,7 @@ func (f *FeedbackTypeExpression) FromString(data string) error {
 	if len(subMatches) == 0 {
 		return errors.New("invalid expression format, expected format: <feedback_type>[<operator><value>]")
 	}
-	f.Weight = 1
+	f.Weight = 0
 	for i, match := range subMatches {
 		switch groupNames[i] {
 		case "feedback_type":
@@ -203,10 +203,10 @@ func MustParseFeedbackTypeExpression(s string) FeedbackTypeExpression {
 func FeedbackWeight(exprs []FeedbackTypeExpression, feedbackType string, value float64) float64 {
 	for _, expr := range exprs {
 		if expr.Match(feedbackType, value) {
-			if expr.Weight == 0 {
+			if expr.Weight <= 0 {
 				return 1
 			}
-			return expr.Weight
+			return 1 + expr.Weight/(1+expr.Weight)
 		}
 	}
 	return 1

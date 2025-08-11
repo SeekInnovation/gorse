@@ -227,7 +227,7 @@ var (
 
 type OnlineEvaluator struct {
 	ReadFeedbacks      []map[int32]mapset.Set[int32]
-	PositiveFeedbacks  map[string][]lo.Tuple3[int32, int32, time.Time]
+	PositiveFeedbacks  map[string][]lo.Tuple4[int32, int32, time.Time, float64]
 	ReverseIndex       map[lo.Tuple2[int32, int32]]time.Time
 	EvaluateDays       int
 	TruncatedDateToday time.Time
@@ -238,7 +238,7 @@ func NewOnlineEvaluator() *OnlineEvaluator {
 	evaluator.EvaluateDays = 30
 	evaluator.TruncatedDateToday = time.Now().Truncate(time.Hour * 24)
 	evaluator.ReverseIndex = make(map[lo.Tuple2[int32, int32]]time.Time)
-	evaluator.PositiveFeedbacks = make(map[string][]lo.Tuple3[int32, int32, time.Time])
+	evaluator.PositiveFeedbacks = make(map[string][]lo.Tuple4[int32, int32, time.Time, float64])
 	evaluator.ReadFeedbacks = make([]map[int32]mapset.Set[int32], evaluator.EvaluateDays)
 	for i := 0; i < evaluator.EvaluateDays; i++ {
 		evaluator.ReadFeedbacks[i] = make(map[int32]mapset.Set[int32])
@@ -260,8 +260,8 @@ func (evaluator *OnlineEvaluator) Read(userIndex, itemIndex int32, timestamp tim
 	}
 }
 
-func (evaluator *OnlineEvaluator) Positive(feedbackType string, userIndex, itemIndex int32, timestamp time.Time) {
-	evaluator.PositiveFeedbacks[feedbackType] = append(evaluator.PositiveFeedbacks[feedbackType], lo.Tuple3[int32, int32, time.Time]{userIndex, itemIndex, timestamp})
+func (evaluator *OnlineEvaluator) Positive(feedbackType string, userIndex, itemIndex int32, weight float64, timestamp time.Time) {
+	evaluator.PositiveFeedbacks[feedbackType] = append(evaluator.PositiveFeedbacks[feedbackType], lo.Tuple4[int32, int32, time.Time, float64]{userIndex, itemIndex, timestamp, weight})
 }
 
 func (evaluator *OnlineEvaluator) Evaluate() []cache.TimeSeriesPoint {
@@ -272,15 +272,23 @@ func (evaluator *OnlineEvaluator) Evaluate() []cache.TimeSeriesPoint {
 			positiveFeedbackSets[i] = make(map[int32]mapset.Set[int32])
 		}
 
+		// accumulate weights per user/item per day
+		positiveWeights := make([]map[int32]map[int32]float64, evaluator.EvaluateDays)
+		for i := 0; i < evaluator.EvaluateDays; i++ {
+			positiveWeights[i] = make(map[int32]map[int32]float64)
+		}
 		for _, f := range positiveFeedbacks {
-			if readTime, exist := evaluator.ReverseIndex[lo.Tuple2[int32, int32]{f.A, f.B}]; exist /* && readTime.Unix() <= f.C.Unix() */ {
-				// truncate timestamp to day
+			if readTime, exist := evaluator.ReverseIndex[lo.Tuple2[int32, int32]{f.A, f.B}]; exist {
 				truncatedTime := readTime.Truncate(time.Hour * 24)
 				readIndex := int(evaluator.TruncatedDateToday.Sub(truncatedTime) / time.Hour / 24)
 				if positiveFeedbackSets[readIndex][f.A] == nil {
 					positiveFeedbackSets[readIndex][f.A] = mapset.NewSet[int32]()
 				}
 				positiveFeedbackSets[readIndex][f.A].Add(f.B)
+				if positiveWeights[readIndex][f.A] == nil {
+					positiveWeights[readIndex][f.A] = make(map[int32]float64)
+				}
+				positiveWeights[readIndex][f.A][int32(f.B)] += f.D
 			}
 		}
 
@@ -289,9 +297,23 @@ func (evaluator *OnlineEvaluator) Evaluate() []cache.TimeSeriesPoint {
 			if len(evaluator.ReadFeedbacks[i]) > 0 {
 				var sum float64
 				for userIndex, readSet := range evaluator.ReadFeedbacks[i] {
-					if positiveSet, exist := positiveFeedbackSets[i][userIndex]; exist {
-						sum += float64(positiveSet.Cardinality()) / float64(readSet.Cardinality())
+					denom := float64(readSet.Cardinality())
+					if denom == 0 {
+						continue
 					}
+					// sum weights for positives, clamp to denom
+					var numerator float64
+					if weightsByItem, exist := positiveWeights[i][userIndex]; exist {
+						for item := range readSet.Iter() {
+							if w, ok := weightsByItem[item]; ok {
+								numerator += w
+							}
+						}
+					}
+					if numerator > denom {
+						numerator = denom
+					}
+					sum += numerator / denom
 				}
 				rate = sum / float64(len(evaluator.ReadFeedbacks[i]))
 			}

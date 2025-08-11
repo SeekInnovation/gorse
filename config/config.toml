@@ -122,7 +122,11 @@ active_user_ttl = 0
 [recommend.data_source]
 
 # The feedback types for positive events.
-positive_feedback_types = ["save:5", "like:2", "comment:3", "impression:0.5", "click:1", "videoView:1", "videoFinished:3", "showMoreClick:1"]
+# Optional weight suffix ":<w>" adds a raw importance.
+# The engine normalizes raw w to a factor in [1,2): 1 + w/(1+w).
+# Omit suffix for no boost (factor = 1). Examples:
+# ["star", "like:2.0", "read>=3:0.5"]
+positive_feedback_types = ["save:5", "like:2", "comment:3", "impression:0.8", "click:1", "videoView:1", "videoFinished:3", "showMoreClick:1"]
 
 # The feedback types for read events.
 read_feedback_types = ["read"]

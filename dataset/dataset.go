@@ -78,25 +78,30 @@ type Dataset struct {
 	itemLabels   *Labels
 	userFeedback [][]int32
 	itemFeedback [][]int32
-	negatives    [][]int32
-	userDict     *FreqDict
-	itemDict     *FreqDict
-	numFeedback  int
-	categories   mapset.Set[string]
+	// Weighted feedback maps: per user -> (item -> weight), per item -> (user -> weight)
+	userFeedbackW []map[int32]float32
+	itemFeedbackW []map[int32]float32
+	negatives     [][]int32
+	userDict      *FreqDict
+	itemDict      *FreqDict
+	numFeedback   int
+	categories    mapset.Set[string]
 }
 
 func NewDataset(timestamp time.Time, userCount, itemCount int) *Dataset {
 	return &Dataset{
-		timestamp:    timestamp,
-		users:        make([]data.User, 0, userCount),
-		items:        make([]data.Item, 0, itemCount),
-		userLabels:   NewLabels(),
-		itemLabels:   NewLabels(),
-		userFeedback: make([][]int32, userCount),
-		itemFeedback: make([][]int32, itemCount),
-		userDict:     NewFreqDict(),
-		itemDict:     NewFreqDict(),
-		categories:   mapset.NewSet[string](),
+		timestamp:     timestamp,
+		users:         make([]data.User, 0, userCount),
+		items:         make([]data.Item, 0, itemCount),
+		userLabels:    NewLabels(),
+		itemLabels:    NewLabels(),
+		userFeedback:  make([][]int32, userCount),
+		itemFeedback:  make([][]int32, itemCount),
+		userFeedbackW: make([]map[int32]float32, userCount),
+		itemFeedbackW: make([]map[int32]float32, itemCount),
+		userDict:      NewFreqDict(),
+		itemDict:      NewFreqDict(),
+		categories:    mapset.NewSet[string](),
 	}
 }
 
@@ -138,6 +143,14 @@ func (d *Dataset) GetUserFeedback() [][]int32 {
 
 func (d *Dataset) GetItemFeedback() [][]int32 {
 	return d.itemFeedback
+}
+
+func (d *Dataset) GetUserFeedbackWeighted() []map[int32]float32 {
+	return d.userFeedbackW
+}
+
+func (d *Dataset) GetItemFeedbackWeighted() []map[int32]float32 {
+	return d.itemFeedbackW
 }
 
 func (d *Dataset) GetCategories() []string {
@@ -203,6 +216,9 @@ func (d *Dataset) AddUser(user data.User) {
 	if len(d.userFeedback) < len(d.users) {
 		d.userFeedback = append(d.userFeedback, nil)
 	}
+	if len(d.userFeedbackW) < len(d.users) {
+		d.userFeedbackW = append(d.userFeedbackW, nil)
+	}
 }
 
 func (d *Dataset) AddItem(item data.Item) {
@@ -218,6 +234,9 @@ func (d *Dataset) AddItem(item data.Item) {
 	if len(d.itemFeedback) < len(d.items) {
 		d.itemFeedback = append(d.itemFeedback, nil)
 	}
+	if len(d.itemFeedbackW) < len(d.items) {
+		d.itemFeedbackW = append(d.itemFeedbackW, nil)
+	}
 	d.categories.Append(item.Categories...)
 }
 
@@ -227,6 +246,29 @@ func (d *Dataset) AddFeedback(userId, itemId string) {
 	d.userFeedback[userIndex] = append(d.userFeedback[userIndex], itemIndex)
 	d.itemFeedback[itemIndex] = append(d.itemFeedback[itemIndex], userIndex)
 	d.numFeedback++
+}
+
+// AddFeedbackWeighted records a weighted positive feedback between a user and an item.
+// It maintains both the unweighted adjacency lists and the weighted maps, accumulating
+// weight if the same user-item pair appears multiple times.
+func (d *Dataset) AddFeedbackWeighted(userId, itemId string, w float32) {
+	userIndex := d.userDict.Add(userId)
+	itemIndex := d.itemDict.Add(itemId)
+
+	// Unweighted adjacency (kept for existing consumers and counts)
+	d.userFeedback[userIndex] = append(d.userFeedback[userIndex], itemIndex)
+	d.itemFeedback[itemIndex] = append(d.itemFeedback[itemIndex], userIndex)
+	d.numFeedback++
+
+	// Weighted maps
+	if d.userFeedbackW[userIndex] == nil {
+		d.userFeedbackW[userIndex] = make(map[int32]float32)
+	}
+	if d.itemFeedbackW[itemIndex] == nil {
+		d.itemFeedbackW[itemIndex] = make(map[int32]float32)
+	}
+	d.userFeedbackW[userIndex][itemIndex] += w
+	d.itemFeedbackW[itemIndex][userIndex] += w
 }
 
 func (d *Dataset) SampleUserNegatives(excludeSet CFSplit, numCandidates int) [][]int32 {

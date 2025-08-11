@@ -122,6 +122,10 @@ active_user_ttl = 0
 [recommend.data_source]
 
 # The feedback types for positive events.
+# Optional weight suffix ":<w>" adds a raw importance.
+# The engine normalizes raw w to a factor in [1,2): 1 + w/(1+w).
+# Omit suffix for no boost (factor = 1). Examples:
+# ["star", "like:2.0", "read>=3:0.5"]
 positive_feedback_types = ["star","like","read>=3"]
 
 # The feedback types for read events.
